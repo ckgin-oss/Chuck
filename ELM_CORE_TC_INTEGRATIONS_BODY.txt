@@ -1,0 +1,462 @@
+--------------------------------------------------------
+--  File created - Friday-October-17-2025   
+--------------------------------------------------------
+--------------------------------------------------------
+--  DDL for Package Body ELMS_CORE_TC_INTEGRATIONS
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE PACKAGE BODY "B_STU"."ELMS_CORE_TC_INTEGRATIONS" AS
+--  2025/05/05  cgin        initial package creation to allow token storage for accessing ELMS CORE system
+--                          we have to send them an authorization request passing them a "state" value
+--                          their site then sends an authorization code to a website with the state
+--                          then we send that auth code back to them for an access token good for 24 hours
+
+--  2025/05/05  cgin    added procedures to build tables and extracts for Teachers College students
+--  2025/10/14  cgin    add new program codes per Stephanie
+
+
+  function fn_check_state_code (p_state in varchar2) return varchar2 AS
+
+    lv_count     number(8,0) := 0;
+
+  BEGIN
+
+    if p_state is not null then
+      select count(state_code) into lv_count
+      from b_stu.elms_core_tc_codes
+      where access_token is null
+      and state_code = p_state
+      ;
+    end if;
+
+    if lv_count = 1 then
+      return 'Valid';
+    else
+      return 'Invalid';
+    end if;
+
+    exception
+      when others then
+        return 'Error';
+
+  END fn_check_state_code;
+
+  function fn_get_active_token return varchar2 AS
+
+    lv_token      varchar2(200 char) := null;
+    lv_count      number(8,0) := 0;
+
+  BEGIN
+    select count(access_token) into lv_count
+    from b_stu.elms_core_tc_codes
+    where expire_dt > sysdate
+    ;
+
+    if lv_count < 1 then
+      return 'NoActive';
+    else
+      select access_token into lv_token
+      from b_stu.elms_core_tc_codes
+      where expire_dt > sysdate
+      and rownum = 1
+      ;
+      return lv_token;
+    end if;
+
+    exception
+      when others then
+        return 'Error';
+
+  END fn_get_active_token;
+
+  procedure set_token (p_state in varchar2
+                      ,p_token in varchar2) AS
+
+  BEGIN
+  -- clean up old tokens
+  delete from b_stu.elms_core_tc_codes
+  where entered_dt < sysdate - 30
+  ;
+
+    if (p_state is not null and p_token is not null) then  
+      update b_stu.elms_core_tc_codes
+      set   access_token = p_token
+          , expire_dt = sysdate + 0.99
+      where state_code = p_state
+      and access_token is null
+      ;
+
+      if sql%rowcount = 1 then
+        commit;
+      end if;
+
+    end if;
+
+    exception
+      when others then
+        rollback;
+        dbms_output.put_line('Error entering state: ' || p_state || ' and token: ' || p_token || '.');
+
+  END set_token;
+
+  procedure set_state_code (p_state in varchar2) AS
+
+    lv_rows     number(8,0) := 0;
+
+  BEGIN
+    if p_state is null then
+      dbms_output.put_line('No value');
+    else
+      insert into b_stu.elms_core_tc_codes
+      (state_code, entered_dt)
+      values
+      (p_state, sysdate)
+      ;
+
+      lv_rows := sql%rowcount;
+
+      if lv_rows <> 1 then
+        dbms_output.put_line('RowError');
+      else
+        commit;
+        dbms_output.put_line('Success');
+      end if;
+    end if;
+
+    exception
+      when others then
+        dbms_output.put_line('Error');
+
+  END set_state_code;
+
+procedure maintain_student_table (p_term in varchar2) as
+  /* 2023/11/30 astegner  added Primary Address Address, City, State, Zip to student table */
+
+  lv_term_code                    varchar2(6 char);
+  lv_procedure                    VARCHAR2(200) := 'B_STU.ELMS_CORE_TC_INTEGRATIONS.maintain_student_table: ';
+
+begin
+  dbms_output.put_line('start maintain_student_table: ' || to_char(sysdate, 'YYYY-MM-DD HH24:MI:SS'));
+
+  select nvl(p_term, stvterm_code) into lv_term_code
+  from b_view.current_term
+  ;
+
+
+  EXECUTE IMMEDIATE 'truncate table B_STU.TC_CORE_STUDENTS_TMP';
+
+  insert into b_stu.TC_CORE_STUDENTS_TMP
+  (
+    PIDM
+  , BSUID
+  , FIRST_NAME
+  , LAST_NAME
+  , GENDER
+  , DATE_OF_BIRTH
+  , RACE
+  , UDCID
+  , EMAIL
+  , SECONDARY_EMAIL
+  , CELL_PHONE
+  , PHONE
+  , GRAD_YEAR
+  , BSU_PROGRAM
+  , PROGRAM_DESC
+  , MAILING_STREET1
+  , MAILING_CITY
+  , MAILING_STATE
+  , MAILING_ZIP
+  )
+  (
+select distinct 
+        spriden_pidm as pidm
+      , spriden_id as bsuid
+      , nvl(spbpers_pref_first_name, spriden_first_name) as first_name
+      , spriden_last_name as last_name
+      , SPBPERS_SEX AS GENDER
+      , SPBPERS_BIRTH_DATE AS DATE_OF_BIRTH
+      , STVETHN_DESC AS RACE
+      , gobumap_udc_id as udcid
+      , lower(email1.goremal_email_address) as email
+      , lower(email2.goremal_email_address) as secondary_email
+      , CASE WHEN CEL.SPRTELE_PHONE_AREA IS NOT NULL
+             THEN CEL.SPRTELE_PHONE_AREA || '-' || SUBSTR(CEL.SPRTELE_PHONE_NUMBER,1,3) || '-' || SUBSTR(CEL.SPRTELE_PHONE_NUMBER,4,4)
+             ELSE 'N/A'
+             END as cell_phone
+      , CASE WHEN PH.SPRTELE_PHONE_AREA IS NOT NULL
+             THEN PH.SPRTELE_PHONE_AREA || '-' || SUBSTR(PH.SPRTELE_PHONE_NUMBER,1,3) || '-' || SUBSTR(PH.SPRTELE_PHONE_NUMBER,4,4)
+             ELSE 'N/A'
+        END as phone  
+      , nvl(to_char(SGBSTDN_EXP_GRAD_DATE, 'YYYY'),'TBD') as grad_year
+      , sorlcur_program as bsu_program
+      , smrprle_program_desc as program_desc
+      , nvl(ll.spraddr_street_line1, nvl(ma.spraddr_street_line1, nvl(pm.spraddr_street_line1, 'No LL, MA, or PM address in Banner'))) as mailing_street
+      , nvl(ll.spraddr_city, nvl(ma.spraddr_city, pm.spraddr_city)) as mailing_city
+      , nvl(ll.spraddr_stat_code, nvl(ma.spraddr_stat_code, pm.spraddr_stat_code)) as mailing_state
+      , nvl(ll.spraddr_zip, nvl(ma.spraddr_zip, pm.spraddr_zip)) as mailing_zip
+    from sorlcur cur
+    inner join sgbstdn stdn
+      on cur.sorlcur_pidm = sgbstdn_pidm
+      and sgbstdn_stst_code = 'AS'
+      and sgbstdn_term_code_eff = (select max(mx.sgbstdn_term_code_eff)
+                                  from sgbstdn mx
+                                  where mx.sgbstdn_pidm = stdn.sgbstdn_pidm
+                                  and mx.sgbstdn_term_code_eff >= lv_term_code
+                                  )
+    inner join spriden
+      on cur.sorlcur_pidm = spriden_pidm
+      and spriden_change_ind is null
+    inner join spbpers
+      on spriden_pidm = spbpers_pidm
+    inner join stvethn
+      on stvethn_code = SPBPERS_ETHN_CODE
+    inner join gobumap
+      on spriden_pidm = gobumap_pidm
+    inner join smrprle
+      on smrprle_program = sorlcur_program
+    left outer join goremal email1
+      on spriden_pidm = email1.goremal_pidm
+      and email1.goremal_status_ind = 'A'
+      and email1.goremal_preferred_ind = 'Y'
+    LEFT OUTER JOIN (
+    SELECT *
+      FROM (SELECT GOREMAL.*, ROW_NUMBER() OVER (PARTITION BY GOREMAL_PIDM ORDER BY GOREMAL_ACTIVITY_DATE DESC) AS rn
+              FROM GOREMAL
+             WHERE GOREMAL_EMAL_CODE = 'ADMS'
+               AND GOREMAL_STATUS_IND = 'A')
+     WHERE rn = 1
+     ) EMAIL2
+       ON cur.sorlcur_pidm = EMAIL2.GOREMAL_PIDM  
+    LEFT OUTER JOIN (
+    SELECT *
+      FROM (SELECT SPRTELE.*, ROW_NUMBER() OVER (PARTITION BY SPRTELE_PIDM ORDER BY SPRTELE_ACTIVITY_DATE DESC) AS rn
+              FROM SPRTELE
+             WHERE SPRTELE_TELE_CODE = 'MA'
+               AND SPRTELE_STATUS_IND IS NULL)
+     WHERE rn = 1
+     ) PH
+       ON cur.sorlcur_pidm = PH.SPRTELE_PIDM
+    LEFT OUTER JOIN (
+    SELECT *
+      FROM (SELECT SPRTELE.*, ROW_NUMBER() OVER (PARTITION BY SPRTELE_PIDM ORDER BY SPRTELE_ACTIVITY_DATE DESC) AS rn
+              FROM SPRTELE
+             WHERE SPRTELE_TELE_CODE = 'CEL'
+               AND SPRTELE_STATUS_IND IS NULL)
+     WHERE rn = 1
+     ) CEL
+       ON cur.sorlcur_pidm = CEL.SPRTELE_PIDM   
+    left outer join b_view.current_addr_all_types_by_pidm ll
+      on cur.sorlcur_pidm = ll.spraddr_pidm
+      and ll.spraddr_atyp_code = 'LL'
+    left outer join b_view.current_addr_all_types_by_pidm ma
+      on cur.sorlcur_pidm = ma.spraddr_pidm
+      and ma.spraddr_atyp_code = 'MA'
+    left outer join b_view.current_addr_all_types_by_pidm pm
+      on cur.sorlcur_pidm = pm.spraddr_pidm
+      and pm.spraddr_atyp_code = 'PM'
+where 
+sorlcur_program in 
+('BS-ARET',  'BA-ARET'
+,'BS-ESPT',  'BA-ESPT'
+,'BS-ECST',  'BA-ECST'
+,'BME-MUET', 'LIC-MUIT'
+,'BS-EHIT',  'BA-EHIT'
+,'BS-ECHT',  'BA-ECHT'
+,'BS-ESIT',  'BA-ESIT'
+,'BS-EMIT',  'BA-EMIT'
+,'BS-ECCT',  'BA-ECCT'
+,'BS-LATT',  'BA-LATT'
+,'BS-GERT',  'BA-GERT'
+,'BS-MLST',  'BA-MLST'
+,'BS-MLJT',  'BA-MLJT'
+,'BS-MLFT',  'BA-MLFT', 'BS-FRNT'
+,'BS-ESCT',  'BA-ESCT'
+,'BS-ENGT',  'BA-ENGT'
+,'BS-PEHT',  'BA-PEHT'
+,'BS-SOST',  'BA-SOST'
+,'BS-ELET',  'BA-ELET'
+,'BS-CHET',  'BA-CHET'
+,'BS-JOUT',  'BA-JOUT'
+,'BS-LSCT',  'BA-LSCT'
+,'BS-MATT',  'BA-MATT'
+,'BS-PHYT',  'BA-PHYT'
+,'BS-THET',  'BA-THET'
+,'MA-COUT'
+,'MA-SEDT'
+,'LIC-ECTT'
+,'LIC-ETTT'
+,'LIC-STTT'
+)
+ and 
+ to_date(sorlcur_activity_date, 'YYYY-MM-DD')||SORLCUR_SEQNO = (select max(to_date(sorlcur_activity_date, 'YYYY-MM-DD')||SORLCUR_SEQNO) from sorlcur s2 where s2.sorlcur_pidm = cur.sorlcur_pidm 
+ and s2.sorlcur_cact_code = 'ACTIVE' and s2.sorlcur_program in
+('BS-ARET',  'BA-ARET'
+,'BS-ESPT',  'BA-ESPT'
+,'BS-ECST',  'BA-ECST'
+,'BME-MUET', 'LIC-MUIT'
+,'BS-EHIT',  'BA-EHIT'
+,'BS-ECHT',  'BA-ECHT'
+,'BS-ESIT',  'BA-ESIT'
+,'BS-EMIT',  'BA-EMIT'
+,'BS-ECCT',  'BA-ECCT'
+,'BS-LATT',  'BA-LATT'
+,'BS-GERT',  'BA-GERT'
+,'BS-MLST',  'BA-MLST'
+,'BS-MLJT',  'BA-MLJT'
+,'BS-MLFT',  'BA-MLFT', 'BS-FRNT'
+,'BS-ESCT',  'BA-ESCT'
+,'BS-ENGT',  'BA-ENGT'
+,'BS-PEHT',  'BA-PEHT'
+,'BS-SOST',  'BA-SOST'
+,'BS-ELET',  'BA-ELET'
+,'BS-CHET',  'BA-CHET'
+,'BS-JOUT',  'BA-JOUT'
+,'BS-LSCT',  'BA-LSCT'
+,'BS-MATT',  'BA-MATT'
+,'BS-PHYT',  'BA-PHYT'
+,'BS-THET',  'BA-THET'
+,'MA-COUT'
+,'MA-SEDT'
+,'LIC-ECTT'
+,'LIC-ETTT'
+,'LIC-STTT'
+))
+)
+;
+
+  commit;
+
+  EXCEPTION
+    WHEN OTHERS THEN
+      DBMS_OUTPUT.PUT_LINE(lv_procedure || substr(SQLERRM,1,400) || ' ' || substr(DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,1,400));
+      RAISE; 
+
+end maintain_student_table;
+
+procedure extract_students as
+  /* 2020/12/22 astegner  initial package creation */
+  /* 2023/11/30 astegner  added Primary Address Address, City, State, Zip to output file *
+  /* 2024/05/02 astegner  Include: Any student that is missing a date in their Grad Year field it should be made into a 'null' for what gets populated into Core ELMS. */
+
+      lv_file_directory               varchar2(200);
+      lv_out_header_row               varchar2(4000) := '';
+      lv_procedure                    VARCHAR2(200) := 'B_STU.ELMS_CORE_TC_INTEGRATIONS.extract_students: ';
+      lv_out_file                     UTL_FILE.file_type;
+      lv_cursor                       SYS_REFCURSOR;      
+      lv_directory                    varchar2(200);
+      lv_file_name                    varchar2(200);
+      lv_header                       varchar2(4000);
+      lv_result                       number;
+
+CURSOR csr_scs IS
+  select distinct
+    '"' || TRIM(BSUID) ||'",' ||
+    '"' || TRIM(replace(FIRST_NAME,',',' ')) ||'",' ||
+    '"' || TRIM(replace(LAST_NAME,',',' ')) ||'",' ||
+    '"' || TRIM(GENDER) ||'",' ||
+    '"' || TRIM(DATE_OF_BIRTH) ||'",' ||
+    '"' || TRIM(RACE) ||'",' ||
+    '"' || TRIM(UDCID) ||'",' ||
+    '"' || TRIM(EMAIL) ||'",' ||
+    '"' || TRIM(NVL(SECONDARY_EMAIL,'null')) ||'",' ||
+    '"' || TRIM(nvl(CELL_PHONE,'null')) ||'",' ||     
+    '"' || TRIM(nvl(PHONE,'null')) ||'",' ||  -- replacing null with text 'null'
+    '"' || TRIM(nvl(GRAD_YEAR,'null')) ||'",' ||  -- replacing null with text 'null'
+    '"' || TRIM(BSU_PROGRAM) ||'",' ||
+    '"' || TRIM(nvl(PROGRAM_DESC,'null')) ||'",' ||  -- replacing null with text 'null'
+    '"' || TRIM(MAILING_STREET1) ||'",' ||
+    '"' || TRIM(nvl(MAILING_STREET2,'null')) ||'",' ||  -- replacing null with text 'null'
+    '"' || TRIM(MAILING_CITY) ||'",' ||
+    '"' || TRIM(MAILING_STATE) ||'",' ||
+    '"' || TRIM(MAILING_ZIP) ||'"'
+    as scs_row
+  from b_stu.TC_CORE_STUDENTS_TMP
+  WHERE BSU_PROGRAM is not null
+;
+
+BEGIN
+  dbms_output.put_line('TC CORE students file started: ' || TO_CHAR(sysdate, 'YYYY-MM-DD HH24:MI:SS'));
+
+  lv_out_header_row := '"BSUID",';
+  lv_out_header_row := lv_out_header_row || '"First Name",';
+  lv_out_header_row := lv_out_header_row || '"Last Name",';
+  lv_out_header_row := lv_out_header_row || '"Gender",';
+  lv_out_header_row := lv_out_header_row || '"Date Of Birth",';
+  lv_out_header_row := lv_out_header_row || '"Race",';  
+  lv_out_header_row := lv_out_header_row || '"SSO ID",';
+  lv_out_header_row := lv_out_header_row || '"Primary Email Address",';
+  lv_out_header_row := lv_out_header_row || '"Secondary Email",';
+  lv_out_header_row := lv_out_header_row || '"Cell Phone",';
+  lv_out_header_row := lv_out_header_row || '"Phone",';
+  lv_out_header_row := lv_out_header_row || '"Grad Year",';
+  lv_out_header_row := lv_out_header_row || '"CORE Program",';
+  lv_out_header_row := lv_out_header_row || '"Program Desc",';
+  lv_out_header_row := lv_out_header_row || '"Primary Address Address1",';
+  lv_out_header_row := lv_out_header_row || '"Primary Address Address2",';
+  lv_out_header_row := lv_out_header_row || '"Primary Address City",';
+  lv_out_header_row := lv_out_header_row || '"Primary Address State",';
+  lv_out_header_row := lv_out_header_row || '"Primary Address Zip"';
+
+
+  lv_file_directory := 'OUTBOUND';
+  lv_file_name := 'son_core_students_tc.csv';
+
+  lv_out_file := UTL_FILE.FOPEN(lv_file_directory, lv_file_name, 'W', 32767);
+  UTL_FILE.PUT_LINE(lv_out_file, lv_out_header_row || chr(13), TRUE);
+
+  FOR l_row in csr_scs
+  LOOP
+    UTL_FILE.PUT_LINE(lv_out_file, l_row.scs_row || chr(13), TRUE);
+    commit;
+  END LOOP;
+
+  UTL_FILE.FCLOSE(lv_out_file);
+
+  COMMIT;
+
+  dbms_output.put_line('Extract file: ' || lv_file_name || ' complete in OUTBOUND (/u12/outgoing): ' || TO_CHAR(sysdate, 'YYYY-MM-DD HH24:MI:SS'));
+
+    EXCEPTION
+       WHEN utl_file.invalid_path THEN
+        raise_application_error(-20000, '**ERROR** Invalid PATH for file: ' || nvl(lv_file_directory,'no path name') || nvl(lv_file_name,'no file name'));
+       WHEN OTHERS THEN
+             DBMS_OUTPUT.PUT_LINE(lv_procedure || substr(SQLERRM,1,400) || ' ' || substr(DBMS_UTILITY.FORMAT_ERROR_BACKTRACE,1,400));
+             RAISE; 
+
+end extract_students;
+
+procedure maintain_tables (p_term in varchar2 default null) as
+
+  lv_term_code      varchar2(6 char);
+
+begin
+  dbms_output.put_line('start maintain_tables: ' || to_char(sysdate, 'YYYY-MM-DD HH24:MI:SS'));
+
+  select nvl(p_term, stvterm_code) into lv_term_code
+  from b_view.current_term
+  ;
+  dbms_output.put_line('      p_term: ' || p_term);
+  dbms_output.put_line('lv_term_code: ' || lv_term_code);
+  b_stu.elms_core_tc_integrations.maintain_student_table (lv_term_code);
+
+  dbms_output.put_line('  end maintain_tables: ' || to_char(sysdate, 'YYYY-MM-DD HH24:MI:SS'));
+
+end maintain_tables;
+
+procedure extract_files as
+begin
+  dbms_output.put_line('start extract files: ' || to_char(sysdate, 'YYYY-MM-DD HH24:MI:SS'));
+
+  b_stu.elms_core_tc_integrations.extract_students;
+
+  dbms_output.put_line('  end extract files: ' || to_char(sysdate, 'YYYY-MM-DD HH24:MI:SS'));
+
+end extract_files;
+
+END ELMS_CORE_TC_INTEGRATIONS;
+
+/
+
+  GRANT EXECUTE ON "B_STU"."ELMS_CORE_TC_INTEGRATIONS" TO "USR_UC4";
+  GRANT EXECUTE ON "B_STU"."ELMS_CORE_TC_INTEGRATIONS" TO "SVC_ELMS_CORE";
+  GRANT EXECUTE ON "B_STU"."ELMS_CORE_TC_INTEGRATIONS" TO "SVC_CORE";
