@@ -1,0 +1,33 @@
+--------------------------------------------------------
+--  File created - Friday-October-17-2025   
+--------------------------------------------------------
+--------------------------------------------------------
+--  DDL for Package ELMS_CORE_TC_INTEGRATIONS
+--------------------------------------------------------
+
+  CREATE OR REPLACE EDITIONABLE PACKAGE "B_STU"."ELMS_CORE_TC_INTEGRATIONS" AS 
+
+function fn_check_state_code (p_state in varchar2) return varchar2;
+
+function fn_get_active_token return varchar2;
+
+procedure set_token (p_state in varchar2
+                    ,p_token in varchar2);
+
+procedure set_state_code (p_state in varchar2);
+
+procedure maintain_student_table (p_term in varchar2);
+
+procedure extract_students;
+
+procedure maintain_tables (p_term in varchar2 default null);
+
+procedure extract_files;
+
+END ELMS_CORE_TC_INTEGRATIONS;
+
+/
+
+  GRANT EXECUTE ON "B_STU"."ELMS_CORE_TC_INTEGRATIONS" TO "USR_UC4";
+  GRANT EXECUTE ON "B_STU"."ELMS_CORE_TC_INTEGRATIONS" TO "SVC_ELMS_CORE";
+  GRANT EXECUTE ON "B_STU"."ELMS_CORE_TC_INTEGRATIONS" TO "SVC_CORE";
